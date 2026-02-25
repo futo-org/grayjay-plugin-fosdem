@@ -80,7 +80,7 @@ const PLAYLIST_URL_REGEX = /video\.fosdem\.org\/(\d{4})\/?(\?[^#]*)?$/;
 let config = {};
 let settings = {};
 let state = {
-    editions: null, // Cache of available editions: { years: number[], fetchedAt: number }
+    editions: { years: [], banners: {}, fetchedAt: 0 }, // Cache of available editions
     categories: {} // Cache of categories per year: { [year]: { totalEvents, tracks, rooms, types } }
 };
 
@@ -100,10 +100,11 @@ source.enable = function (conf, sett, savedStateStr) {
 
     if (savedStateStr) {
         try {
-            state = JSON.parse(savedStateStr);
+            const parsed = JSON.parse(savedStateStr);
+            if (parsed.editions) state.editions = parsed.editions;
+            if (parsed.categories) state.categories = parsed.categories;
         } catch (e) {
             log("Failed to parse saved state: " + e.message);
-            state = {};
         }
     }
 
@@ -453,7 +454,11 @@ function fetchCategoriesForYear(year) {
     if (state.categories[yearStr]) return state.categories[yearStr];
 
     const resp = httpGET({ url: SEARCH_API_BASE_URL + "/categories?year=" + year, parseResponse: true });
-    const data = resp.isOk && resp.body ? resp.body : {};
+    if (!resp.isOk || !resp.body) {
+        return { totalEvents: 0, tracks: [], rooms: [], types: [] };
+    }
+    
+    const data = resp.body;
     const result = {
         totalEvents: data.totalEvents || 0,
         tracks: data.tracks || [],
@@ -471,7 +476,10 @@ function fetchCategoriesForYear(year) {
  */
 function fetchSearchFilters() {
     const resp = httpGET({ url: SEARCH_API_BASE_URL + "/categories", parseResponse: true });
-    const data = resp.isOk && resp.body ? resp.body : {};
+    if (!resp.isOk || !resp.body) {
+        return { tracks: [], rooms: [], types: [] };
+    }
+    const data = resp.body;
     return {
         tracks: (data.tracks || []).map(function (t) { return t.name; }),
         rooms: (data.rooms || []).map(function (r) { return r.name; }),
@@ -880,10 +888,8 @@ function httpGET(options) {
  * Skips the fetch if a valid cache exists.
  */
 function fetchEditions() {
-    if (state.editions && state.editions.years && state.editions.years.length > 0) {
-        if (Date.now() - state.editions.fetchedAt < EDITIONS_TTL_MS) {
-            return;
-        }
+    if (state.editions.years.length > 0 && (Date.now() - state.editions.fetchedAt < EDITIONS_TTL_MS)) {
+        return;
     }
 
     const resp = httpGET({ url: SEARCH_API_BASE_URL + "/editions", parseResponse: true });
@@ -904,10 +910,8 @@ function fetchEditions() {
  * @returns {number[]}
  */
 function getAvailableYears() {
-    if (state.editions && state.editions.years && state.editions.years.length > 0) {
-        return state.editions.years;
-    }
-    return [];
+    fetchEditions();
+    return state.editions.years;
 }
 
 /**
@@ -937,10 +941,8 @@ function getChannelThumbnailUrl() {
  * @returns {string} Thumbnail URL
  */
 function getYearThumbnailUrl(year) {
-    if (state.editions && state.editions.banners && state.editions.banners[year]) {
-        return state.editions.banners[year];
-    }
-    return "";
+    fetchEditions();
+    return state.editions.banners[year] || "";
 }
 
 /**
