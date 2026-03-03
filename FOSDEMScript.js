@@ -332,7 +332,7 @@ source.getContentRecommendations = function (url) {
 
 source.getSearchCapabilities = function () {
     return new ResultCapabilities(
-        [Type.Feed.Videos, Type.Feed.Playlists, Type.Feed.Channels],
+        [Type.Feed.Videos, Type.Feed.Playlists],
         [],
         buildSearchFilterGroups()
     );
