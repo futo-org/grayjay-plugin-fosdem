@@ -143,7 +143,7 @@ source.getHome = function () {
  * @returns {boolean}
  */
 source.isChannelUrl = function (url) {
-    return CHANNEL_URL_REGEX.test(url) || SPEAKER_URL_REGEX.test(url);
+    return CHANNEL_URL_REGEX.test(url) || !!getSpeakerSlugFromUrl(url);
 };
 
 /**
@@ -152,9 +152,9 @@ source.isChannelUrl = function (url) {
  * @returns {PlatformChannel}
  */
 source.getChannel = function (url) {
-    const speakerMatch = url.match(SPEAKER_URL_REGEX);
-    if (speakerMatch) {
-        return getSpeakerChannel(speakerMatch[1]);
+    const speakerSlug = getSpeakerSlugFromUrl(url);
+    if (speakerSlug) {
+        return getSpeakerChannel(speakerSlug);
     }
 
     return new PlatformChannel({
@@ -196,12 +196,12 @@ source.getChannelCapabilities = function () {
  * @returns {VideoPager|PlaylistPager}
  */
 source.getChannelContents = function (url, type, order, filters) {
-    const speakerMatch = url.match(SPEAKER_URL_REGEX);
-    if (speakerMatch) {
+    const speakerSlug = getSpeakerSlugFromUrl(url);
+    if (speakerSlug) {
         if (type === Type.Feed.Playlists) {
-            return getSpeakerPlaylists(speakerMatch[1]);
+            return getSpeakerPlaylists(speakerSlug);
         }
-        return getSpeakerEvents(speakerMatch[1], 1);
+        return getSpeakerEvents(speakerSlug, 1);
     }
 
     if (type === Type.Feed.Playlists) {
@@ -216,9 +216,9 @@ source.getChannelContents = function (url, type, order, filters) {
  * @returns {FOSDEMPlaylistPager}
  */
 source.getChannelPlaylists = function (url) {
-    const speakerMatch = url.match(SPEAKER_URL_REGEX);
-    if (speakerMatch) {
-        return getSpeakerPlaylists(speakerMatch[1]);
+    const speakerSlug = getSpeakerSlugFromUrl(url);
+    if (speakerSlug) {
+        return getSpeakerPlaylists(speakerSlug);
     }
     return getChannelPlaylists();
 };
@@ -976,6 +976,24 @@ function parseContentUrl(url) {
     }
 
     return null;
+}
+
+/**
+ * Extracts and decodes a speaker slug from a channel URL.
+ * Handles percent-encoded speaker slugs from links embedded in descriptions.
+ * @param {string} url - Channel URL
+ * @returns {string|null} Decoded speaker slug or null if the URL is not a speaker URL
+ */
+function getSpeakerSlugFromUrl(url) {
+    const match = url ? url.match(SPEAKER_URL_REGEX) : null;
+    if (!match) return null;
+
+    try {
+        return decodeURIComponent(match[1]);
+    } catch (e) {
+        // Malformed percent-encoding; use raw slug as-is
+        return match[1];
+    }
 }
 
 /**
