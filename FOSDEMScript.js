@@ -1304,7 +1304,7 @@ function createPlaylistForYear(year, videoCount) {
 
 /**
  * Creates a PlatformChannel from a speaker API object.
- * @param {Object} speaker - Speaker object with slug, name, biography, eventCount
+ * @param {Object} speaker - Speaker object with slug, name, biography
  * @returns {PlatformChannel}
  */
 function createPlatformChannelFromSpeaker(speaker) {
@@ -1313,7 +1313,7 @@ function createPlatformChannelFromSpeaker(speaker) {
         name: speaker.name,
         thumbnail: getChannelThumbnailUrl(),
         banner: getChannelBannerUrl(),
-        subscribers: speaker.eventCount || 0,
+        subscribers: 0,
         description: (speaker.biography || "") + "\n\nContent by FOSDEM (fosdem.org), licensed under CC-BY-2.0-BE.",
         url: SCHEDULE_BASE_URL + "/schedule/speaker/" + encodeURIComponent(speaker.slug) + "/",
         links: {}
