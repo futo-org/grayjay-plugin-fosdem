@@ -16,6 +16,7 @@ const REQUEST_HEADERS = {
 };
 
 const ITEMS_PER_PAGE = 20;
+const CHANNEL_SEARCH_MAX_FETCHES = 5;
 const HEIGHT_1080 = 1080;
 const IS_ANDROID = bridge.buildPlatform === "android";
 
@@ -24,6 +25,7 @@ const FILTER_TRACK = "track";
 const FILTER_ROOM = "room";
 const FILTER_TYPE = "type";
 const FILTER_SPEAKER = "speaker";
+const FILTER_YEAR = "year";
 const CATEGORY_EDITION = "edition";
 const LINK_TYPE_FEEDBACK = "feedback";
 
@@ -72,6 +74,12 @@ const SPEAKER_URL_REGEX = /fosdem\.org\/(?:\d{4}\/)?schedule\/speaker\/([^\/]+)/
  */
 const PLAYLIST_URL_REGEX = /video\.fosdem\.org\/(\d{4})\/?(\?[^#]*)?$/;
 
+/**
+ * Query string marker that flags a /{year}/ URL as a year-channel rather than the
+ * year-overview playlist (which uses the same path with no query).
+ */
+const YEAR_CHANNEL_QUERY = "channel=1";
+
 
 // ==========================================================================
 // State
@@ -116,7 +124,10 @@ source.enable = function (conf, sett, savedStateStr) {
  * @returns {string} JSON string of the current state
  */
 source.saveState = function () {
-    return JSON.stringify(state);
+    return JSON.stringify({
+        editions: state.editions,
+        categories: state.categories
+    });
 };
 
 /**
@@ -143,7 +154,9 @@ source.getHome = function () {
  * @returns {boolean}
  */
 source.isChannelUrl = function (url) {
-    return CHANNEL_URL_REGEX.test(url) || !!getSpeakerSlugFromUrl(url);
+    return CHANNEL_URL_REGEX.test(url)
+        || !!getYearFromChannelUrl(url)
+        || !!getSpeakerSlugFromUrl(url);
 };
 
 /**
@@ -157,22 +170,12 @@ source.getChannel = function (url) {
         return getSpeakerChannel(speakerSlug);
     }
 
-    return new PlatformChannel({
-        id: new PlatformID(PLATFORM, "fosdem", config.id),
-        name: PLATFORM,
-        thumbnail: getChannelThumbnailUrl(),
-        banner: getChannelBannerUrl(),
-        subscribers: 0,
-        description: CHANNEL_DESCRIPTION,
-        url: BASE_URL,
-        links: {
-            "Website": "https://fosdem.org",
-            "Mastodon": "https://fosstodon.org/@fosdem",
-            "Bluesky": "https://bsky.app/profile/fosdem.org",
-            "LinkedIn": "https://www.linkedin.com/company/fosdem/",
-            "Matrix": "https://matrix.to/#/#fosdem:fosdem.org"
-        }
-    });
+    const year = getYearFromChannelUrl(url);
+    if (year) {
+        return createYearChannel(year);
+    }
+
+    return createMainChannel();
 };
 
 /**
@@ -204,6 +207,14 @@ source.getChannelContents = function (url, type, order, filters) {
         return getSpeakerEvents(speakerSlug, 1);
     }
 
+    const year = getYearFromChannelUrl(url);
+    if (year) {
+        if (type === Type.Feed.Playlists) {
+            return getYearChannelPlaylists(year);
+        }
+        return fetchApiEventsPage(year, 1, [year], 0);
+    }
+
     if (type === Type.Feed.Playlists) {
         return source.getChannelPlaylists(url);
     }
@@ -220,6 +231,10 @@ source.getChannelPlaylists = function (url) {
     if (speakerSlug) {
         return getSpeakerPlaylists(speakerSlug);
     }
+    const year = getYearFromChannelUrl(url);
+    if (year) {
+        return getYearChannelPlaylists(year);
+    }
     return getChannelPlaylists();
 };
 
@@ -229,7 +244,7 @@ source.getChannelPlaylists = function (url) {
  * @returns {boolean}
  */
 source.isPlaylistUrl = function (url) {
-    return PLAYLIST_URL_REGEX.test(url);
+    return PLAYLIST_URL_REGEX.test(url) && !getYearFromChannelUrl(url);
 };
 
 /**
@@ -256,7 +271,7 @@ source.getPlaylist = function (url) {
     else if (parsed.type) { name += " - Type " + parsed.type; playlistId += "-" + FILTER_TYPE + "-" + parsed.type; }
 
     return new PlatformPlaylistDetails({
-        id: new PlatformID(PLATFORM, playlistId, config.id),
+        id: fosdemId(playlistId),
         name: name,
         author: firstPage.speakerAuthor || fosdemAuthor(),
         url: url,
@@ -316,7 +331,7 @@ source.getContentRecommendations = function (url) {
 
     const recUrl = SEARCH_API_BASE_URL + "/events/" + parsed.year + "/" + encodeURIComponent(parsed.slug)
         + "/recommendations?pageSize=" + ITEMS_PER_PAGE;
-    const resp = httpGET({ url: recUrl, parseResponse: true });
+    const resp = httpGET(recUrl);
     if (!resp.isOk || !resp.body || !resp.body.items) {
         return new FOSDEMApiPager([], false, [], 0, 1, 0);
     }
@@ -347,28 +362,49 @@ source.searchPlaylists = function (query) {
 };
 
 source.searchChannels = function (query) {
-    return searchSpeakersApi(query, 1);
+    const trimmed = (query || "").trim();
+    if (trimmed.length === 0) {
+        return searchSpeakersApi(query, 1);
+    }
+
+    const fosdemChannels = buildMatchingFosdemChannels(trimmed);
+    const speakerPager = searchSpeakersApi(trimmed, 1);
+    const speakerResults = speakerPager.results || [];
+    const combinedResults = fosdemChannels.concat(speakerResults);
+    const firstPage = combinedResults.slice(0, ITEMS_PER_PAGE);
+    const pendingItems = combinedResults.slice(ITEMS_PER_PAGE);
+
+    return new FOSDEMChannelSearchPager(firstPage, pendingItems.length > 0 || !!speakerPager.hasMore, {
+        query: trimmed,
+        totalResults: (speakerPager.totalResults || 0) + fosdemChannels.length,
+        pendingItems: pendingItems,
+        nextSpeakerPage: 2,
+        speakerHasMore: !!speakerPager.hasMore
+    });
 };
 
 source.getSearchChannelContentsCapabilities = function () {
     return new ResultCapabilities(
         [Type.Feed.Videos],
         [],
-        buildSearchFilterGroups()
+        buildSearchFilterGroups({ excludeYear: true })
     );
 };
 
 source.searchChannelContents = function (channelUrl, query, type, order, filters) {
+    const year = getYearFromChannelUrl(channelUrl);
+    if (year) {
+        const merged = Object.assign({}, filters || {});
+        merged[FILTER_YEAR] = [String(year)];
+        return searchApi(query, 1, merged);
+    }
     return searchApi(query, 1, filters);
 };
 
 source.searchSuggestions = function (query) {
     if (!query || query.trim().length === 0) return [];
 
-    const response = httpGET({
-        url: SEARCH_API_BASE_URL + "/autocomplete?q=" + encodeURIComponent(query) + "&limit=10",
-        parseResponse: true
-    });
+    const response = httpGET(SEARCH_API_BASE_URL + "/autocomplete?q=" + encodeURIComponent(query) + "&limit=10");
 
     if (!response.isOk || !response.body || !response.body.suggestions) return [];
 
@@ -383,7 +419,7 @@ source.searchSuggestions = function (query) {
  */
 function getEventFromApi(year, slug) {
     const url = SEARCH_API_BASE_URL + "/events/" + year + "/" + encodeURIComponent(slug);
-    const resp = httpGET({ url: url, parseResponse: true });
+    const resp = httpGET(url);
     if (!resp.isOk || !resp.body) return null;
     return resp.body;
 }
@@ -400,7 +436,7 @@ function getEventFromApi(year, slug) {
 function fetchApiEventsPage(year, page, years, yearIndex) {
     const url = SEARCH_API_BASE_URL + "/events?year=" + year
         + "&page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
-    const resp = httpGET({ url: url, parseResponse: true });
+    const resp = httpGET(url);
     if (!resp.isOk || !resp.body || !resp.body.items) {
         return new FOSDEMApiPager([], false, years, yearIndex, page, 0);
     }
@@ -430,7 +466,7 @@ function fetchFilteredEventsPage(year, page, filters) {
     if (type) url += "&" + FILTER_TYPE + "=" + encodeURIComponent(type);
     if (speaker) url += "&" + FILTER_SPEAKER + "=" + encodeURIComponent(speaker);
 
-    const resp = httpGET({ url: url, parseResponse: true });
+    const resp = httpGET(url);
     if (!resp.isOk || !resp.body || !resp.body.items) {
         return new FOSDEMPlaylistContentsPager([], false, year, page, 0, 0, filters);
     }
@@ -453,7 +489,7 @@ function fetchCategoriesForYear(year) {
     const yearStr = String(year);
     if (state.categories[yearStr]) return state.categories[yearStr];
 
-    const resp = httpGET({ url: SEARCH_API_BASE_URL + "/categories?year=" + year, parseResponse: true });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/categories?year=" + year);
     if (!resp.isOk || !resp.body) {
         return { totalEvents: 0, tracks: [], rooms: [], types: [] };
     }
@@ -475,7 +511,7 @@ function fetchCategoriesForYear(year) {
  * @returns {Object} Object with tracks, rooms, types string arrays
  */
 function fetchSearchFilters() {
-    const resp = httpGET({ url: SEARCH_API_BASE_URL + "/categories", parseResponse: true });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/categories");
     if (!resp.isOk || !resp.body) {
         return { tracks: [], rooms: [], types: [] };
     }
@@ -489,20 +525,24 @@ function fetchSearchFilters() {
 
 /**
  * Builds search filter groups for ResultCapabilities.
+ * @param {Object} [opts]
+ * @param {boolean} [opts.excludeYear=false] - Omit the Year filter group (used by year-channel search where year is implicit)
  * @returns {FilterGroup[]}
  */
-function buildSearchFilterGroups() {
-    const years = getAvailableYears();
+function buildSearchFilterGroups(opts) {
     const filters = fetchSearchFilters();
+    const groups = [];
 
-    const groups = [
-        new FilterGroup("Year",
+    if (!opts || !opts.excludeYear) {
+        const years = getAvailableYears();
+        groups.push(new FilterGroup("Year",
             years.map(function (y) { return new FilterCapability(String(y), String(y), String(y)); }),
-            false, "year"),
-        new FilterGroup("Type",
-            filters.types.map(function (t) { return new FilterCapability(t, t, t); }),
-            false, FILTER_TYPE)
-    ];
+            false, FILTER_YEAR));
+    }
+
+    groups.push(new FilterGroup("Type",
+        filters.types.map(function (t) { return new FilterCapability(t, t, t); }),
+        false, FILTER_TYPE));
 
     if (filters.tracks.length > 0) {
         groups.push(new FilterGroup("Track",
@@ -528,7 +568,7 @@ function buildSearchFilterGroups() {
  */
 function createFilteredPlaylist(year, filterType, filterValue, videoCount) {
     return new PlatformPlaylist({
-        id: new PlatformID(PLATFORM, "fosdem-" + year + "-" + filterType + "-" + filterValue, config.id),
+        id: fosdemId("fosdem-" + year + "-" + filterType + "-" + filterValue),
         name: "FOSDEM " + year + " - " + capitalize(filterType) + " " + filterValue,
         author: fosdemAuthor(),
         thumbnail: getYearThumbnailUrl(year),
@@ -579,13 +619,13 @@ function searchApi(query, page, filters) {
     let url = SEARCH_API_BASE_URL + "/search?q=" + encodeURIComponent(query)
         + "&page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
     if (filters) {
-        if (filters.year && filters.year.length > 0) url += "&year=" + encodeURIComponent(filters.year[0]);
+        if (filters[FILTER_YEAR] && filters[FILTER_YEAR].length > 0) url += "&" + FILTER_YEAR + "=" + encodeURIComponent(filters[FILTER_YEAR][0]);
         if (filters[FILTER_TRACK] && filters[FILTER_TRACK].length > 0) url += "&" + FILTER_TRACK + "=" + encodeURIComponent(filters[FILTER_TRACK][0]);
         if (filters[FILTER_ROOM] && filters[FILTER_ROOM].length > 0) url += "&" + FILTER_ROOM + "=" + encodeURIComponent(filters[FILTER_ROOM][0]);
         if (filters[FILTER_TYPE] && filters[FILTER_TYPE].length > 0) url += "&" + FILTER_TYPE + "=" + encodeURIComponent(filters[FILTER_TYPE][0]);
     }
 
-    const response = httpGET({ url: url, parseResponse: true });
+    const response = httpGET(url);
 
     if (!response.isOk || !response.body) {
         return new FOSDEMSearchPager([], false, query, page, 0, filters);
@@ -613,7 +653,7 @@ function searchPlaylistsApi(query, page) {
     const url = SEARCH_API_BASE_URL + "/categories/search?q=" + encodeURIComponent(query)
         + "&page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
 
-    const response = httpGET({ url: url, parseResponse: true });
+    const response = httpGET(url);
 
     if (!response.isOk || !response.body) {
         return new FOSDEMSearchPlaylistPager([], false, query, page, 0);
@@ -645,7 +685,7 @@ function searchSpeakersApi(query, page) {
     const url = SEARCH_API_BASE_URL + "/speakers/search?q=" + encodeURIComponent(query)
         + "&page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
 
-    const response = httpGET({ url: url, parseResponse: true });
+    const response = httpGET(url);
 
     if (!response.isOk || !response.body) {
         return new FOSDEMSpeakerSearchPager([], false, query, page, 0);
@@ -735,6 +775,51 @@ class FOSDEMSpeakerSearchPager extends ChannelPager {
 
     nextPage() {
         return searchSpeakersApi(this.query, this.page + 1);
+    }
+}
+
+/**
+ * Pager for channel search results that prepends synthetic FOSDEM channels
+ * while keeping pagination consistent with speaker search results.
+ * @extends ChannelPager
+ */
+class FOSDEMChannelSearchPager extends ChannelPager {
+    constructor(results, hasMore, opts) {
+        super(results, hasMore);
+        this.query = opts.query;
+        this.totalResults = opts.totalResults;
+        this.pendingItems = opts.pendingItems || [];
+        this.nextSpeakerPage = opts.nextSpeakerPage;
+        this.speakerHasMore = opts.speakerHasMore;
+    }
+
+    nextPage() {
+        let items = this.pendingItems;
+        let nextSpeakerPage = this.nextSpeakerPage;
+        let speakerHasMore = this.speakerHasMore;
+
+        // Bounded loop guards against an API that keeps reporting hasMore with non-empty pages.
+        for (let i = 0; i < CHANNEL_SEARCH_MAX_FETCHES && items.length < ITEMS_PER_PAGE && speakerHasMore; i++) {
+            const speakerPager = searchSpeakersApi(this.query, nextSpeakerPage);
+            const speakerResults = speakerPager.results || [];
+            nextSpeakerPage += 1;
+            speakerHasMore = !!speakerPager.hasMore;
+            if (speakerResults.length === 0) {
+                speakerHasMore = false;
+                break;
+            }
+            items = items.concat(speakerResults);
+        }
+
+        const page = items.slice(0, ITEMS_PER_PAGE);
+        const remaining = items.slice(ITEMS_PER_PAGE);
+        return new FOSDEMChannelSearchPager(page, remaining.length > 0 || speakerHasMore, {
+            query: this.query,
+            totalResults: this.totalResults,
+            pendingItems: remaining,
+            nextSpeakerPage: nextSpeakerPage,
+            speakerHasMore: speakerHasMore
+        });
     }
 }
 
@@ -838,49 +923,59 @@ class FOSDEMStaticPlaylistPager extends PlaylistPager {
 // ==========================================================================
 
 /**
- * Performs an HTTP GET request with default headers and error handling.
- * @param {Object} options - Request options
- * @param {string} options.url - The URL to fetch
- * @param {boolean} [options.parseResponse=false] - If true, parse response body as JSON
- * @param {Object} [options.headers=null] - Custom headers (overrides defaults)
+ * Performs an HTTP GET request with default headers and JSON parsing.
+ * @param {string} url - The URL to fetch
  * @returns {Object} Response object with isOk, code, body, and headers
  */
-function httpGET(options) {
-    const {
-        url,
-        parseResponse = false,
-        headers = null
-    } = options;
-
-    const localHeaders = headers ?? REQUEST_HEADERS;
-
+function httpGET(url) {
     try {
-        const response = http.GET(url, localHeaders, false);
+        const response = http.GET(url, REQUEST_HEADERS, false);
 
         if (!response.isOk) {
             log("HTTP request failed: " + url + " (code: " + response.code + ")");
             return response;
         }
 
-        if (parseResponse) {
-            try {
-                const parsed = JSON.parse(response.body);
-                return {
-                    code: response.code,
-                    isOk: response.isOk,
-                    body: parsed,
-                    headers: response.headers
-                };
-            } catch (e) {
-                log("Failed to parse JSON from: " + url + " - " + e.message);
-            }
+        try {
+            const parsed = JSON.parse(response.body);
+            return {
+                code: response.code,
+                isOk: response.isOk,
+                body: parsed,
+                headers: response.headers
+            };
+        } catch (e) {
+            log("Failed to parse JSON from: " + url + " - " + e.message);
+            return { isOk: false, code: response.code, body: null, headers: response.headers };
         }
-
-        return response;
     } catch (e) {
         log("HTTP request error: " + url + " - " + e.message);
-        return { isOk: false, code: 0, body: "", headers: {} };
+        return { isOk: false, code: 0, body: null, headers: {} };
     }
+}
+
+/**
+ * Safely extracts URL search parameters.
+ * @param {string} url - Absolute URL
+ * @returns {URLSearchParams|null} Parsed search parameters, or null for invalid URLs
+ */
+function getSearchParams(url) {
+    try {
+        return new URL(url).searchParams;
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Safely extracts one URL search parameter.
+ * @param {string} url - Absolute URL
+ * @param {string} name - Search parameter name
+ * @returns {string|null} Parameter value, or null when missing or invalid
+ */
+function getSearchParam(url, name) {
+    const params = getSearchParams(url);
+    return params ? params.get(name) : null;
 }
 
 /**
@@ -892,7 +987,7 @@ function fetchEditions() {
         return;
     }
 
-    const resp = httpGET({ url: SEARCH_API_BASE_URL + "/editions", parseResponse: true });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/editions");
     if (!resp.isOk || !resp.body || !resp.body.editions) {
         log("Failed to fetch editions from API");
         return;
@@ -965,7 +1060,7 @@ function parseContentUrl(url) {
     let match = url.match(CONTENT_DETAILS_URL_REGEX);
     if (match) {
         const result = { year: match[1], slug: match[2] };
-        const speakerSlug = new URL(url).searchParams.get("speakerSlug");
+        const speakerSlug = getSearchParam(url, "speakerSlug");
         if (speakerSlug) result.speakerSlug = speakerSlug;
         return result;
     }
@@ -997,6 +1092,19 @@ function getSpeakerSlugFromUrl(url) {
 }
 
 /**
+ * Extracts the year from a year-channel URL (requires channel=1 query param).
+ * @param {string} url - Channel URL
+ * @returns {number|null} Year if URL is a year-channel URL, null otherwise
+ */
+function getYearFromChannelUrl(url) {
+    if (!url) return null;
+    const m = url.match(PLAYLIST_URL_REGEX);
+    if (!m || !m[2] || m[2].indexOf("channel=") < 0) return null;
+    if (getSearchParam(url, "channel") !== "1") return null;
+    return parseInt(m[1], 10);
+}
+
+/**
  * Parses a playlist URL into year and optional filter parameters.
  * @param {string} url - Playlist URL
  * @returns {Object|null} Object with year and optional track, room, type properties
@@ -1006,7 +1114,8 @@ function parsePlaylistUrl(url) {
     if (!match) return null;
 
     const result = { year: parseInt(match[1]) };
-    const params = new URL(url).searchParams;
+    const params = getSearchParams(url);
+    if (!params) return null;
     if (params.has(FILTER_TRACK)) result.track = params.get(FILTER_TRACK);
     if (params.has(FILTER_ROOM)) result.room = params.get(FILTER_ROOM);
     if (params.has(FILTER_TYPE)) result.type = params.get(FILTER_TYPE);
@@ -1033,7 +1142,7 @@ function buildVideoSources(event, durationSeconds) {
             name: "MP4",
             url: event.mp4Url,
             width: 1920, height: 1080,
-            container: "video/mp4", 
+            container: "video/mp4",
             codec: "h264",
             duration: durationSeconds
         });
@@ -1046,7 +1155,7 @@ function buildVideoSources(event, durationSeconds) {
         const webmSource = new VideoUrlSource({
             name: isAv1 ? "AV1/WebM" : "WebM",
             url: event.webmUrl,
-            width: 1920, 
+            width: 1920,
             height: 1080,
             container: "video/webm",
             codec: isAv1 ? "av1" : "vp9",
@@ -1186,9 +1295,13 @@ function formatMetadataLink(label, filterType, value, year) {
  */
 function appendSpeakerHint(url, slug) {
     if (!url || !slug) return url;
-    const u = new URL(url);
-    u.searchParams.set("speakerSlug", slug);
-    return u.toString();
+    try {
+        const u = new URL(url);
+        u.searchParams.set("speakerSlug", slug);
+        return u.toString();
+    } catch (e) {
+        return url;
+    }
 }
 
 /**
@@ -1209,16 +1322,68 @@ function findSpeakerName(events, slug) {
 }
 
 /**
+ * Builds a PlatformID under the FOSDEM platform/config.
+ * @param {string} suffix - Stable per-entity ID suffix
+ * @returns {PlatformID}
+ */
+function fosdemId(suffix) {
+    return new PlatformID(PLATFORM, suffix, config.id);
+}
+
+/**
  * Creates a PlatformAuthorLink for the FOSDEM channel.
  * @returns {PlatformAuthorLink}
  */
 function fosdemAuthor() {
     return new PlatformAuthorLink(
-        new PlatformID(PLATFORM, "fosdem", config.id),
+        fosdemId("fosdem"),
         PLATFORM,
         BASE_URL,
         getChannelThumbnailUrl()
     );
+}
+
+/**
+ * Returns the synthetic FOSDEM channels that match a channel-search query.
+ * @param {string} query - Channel search query
+ * @returns {PlatformChannel[]}
+ */
+function buildMatchingFosdemChannels(query) {
+    const lower = query.toLowerCase();
+    const channels = [];
+
+    if (PLATFORM.toLowerCase().includes(lower)) {
+        channels.push(createMainChannel());
+    }
+
+    const years = getAvailableYears();
+    for (let i = 0; i < years.length; i++) {
+        const name = PLATFORM + " " + years[i];
+        if (name.toLowerCase().includes(lower)) {
+            channels.push(createYearChannel(years[i]));
+        }
+    }
+
+    return channels;
+}
+
+/**
+ * Creates a PlatformAuthorLink for a specific FOSDEM edition (year channel).
+ * @param {number|string} year - FOSDEM edition year
+ * @returns {PlatformAuthorLink}
+ */
+function fosdemYearAuthor(year) {
+    return new PlatformAuthorLink(
+        fosdemId("fosdem-channel-" + year),
+        PLATFORM + " " + year,
+        buildYearChannelUrl(year),
+        getYearThumbnailUrl(year) || getChannelThumbnailUrl()
+    );
+}
+
+/** Builds the canonical year-channel URL. */
+function buildYearChannelUrl(year) {
+    return BASE_URL + "/" + year + "/?" + YEAR_CHANNEL_QUERY;
 }
 
 /**
@@ -1229,7 +1394,7 @@ function fosdemAuthor() {
  */
 function buildSpeakerAuthor(slug, name) {
     return new PlatformAuthorLink(
-        new PlatformID(PLATFORM, FILTER_SPEAKER + "-" + slug, config.id),
+        fosdemId(FILTER_SPEAKER + "-" + slug),
         name,
         SCHEDULE_BASE_URL + "/schedule/speaker/" + encodeURIComponent(slug) + "/",
         getChannelThumbnailUrl()
@@ -1265,11 +1430,12 @@ function getSpeakerSuffix(event) {
  * @returns {Object} Fields object
  */
 function buildBaseVideoFields(item, author) {
+    const defaultAuthor = item.year ? fosdemYearAuthor(item.year) : fosdemAuthor();
     return {
-        id: new PlatformID(PLATFORM, String(item.id), config.id),
+        id: fosdemId(String(item.id)),
         name: item.title + getSpeakerSuffix(item),
         thumbnails: item.thumbnailUrl ? new Thumbnails([new Thumbnail(item.thumbnailUrl, HEIGHT_1080)]) : new Thumbnails([]),
-        author: author || fosdemAuthor(),
+        author: author || defaultAuthor,
         uploadDate: parseEventDate(item.date),
         duration: item.duration || -1,
         viewCount: 0,
@@ -1311,7 +1477,7 @@ function createPlatformVideoDetailsFromApiResult(item, author) {
  */
 function createPlaylistForYear(year, videoCount) {
     return new PlatformPlaylist({
-        id: new PlatformID(PLATFORM, "fosdem-" + year, config.id),
+        id: fosdemId("fosdem-" + year),
         name: "FOSDEM " + year,
         author: fosdemAuthor(),
         thumbnail: getYearThumbnailUrl(year),
@@ -1321,13 +1487,67 @@ function createPlaylistForYear(year, videoCount) {
 }
 
 /**
+ * Creates the main FOSDEM PlatformChannel (cross-year).
+ * @returns {PlatformChannel}
+ */
+function createMainChannel() {
+    return new PlatformChannel({
+        id: fosdemId("fosdem"),
+        name: PLATFORM,
+        thumbnail: getChannelThumbnailUrl(),
+        banner: getChannelBannerUrl(),
+        subscribers: 0,
+        description: CHANNEL_DESCRIPTION,
+        url: BASE_URL,
+        links: {
+            "Website": "https://fosdem.org",
+            "Mastodon": "https://fosstodon.org/@fosdem",
+            "Bluesky": "https://bsky.app/profile/fosdem.org",
+            "LinkedIn": "https://www.linkedin.com/company/fosdem/",
+            "Matrix": "https://matrix.to/#/#fosdem:fosdem.org"
+        }
+    });
+}
+
+/**
+ * Creates a PlatformChannel for a specific FOSDEM edition (year).
+ * @param {number} year - FOSDEM edition year
+ * @returns {PlatformChannel}
+ */
+function createYearChannel(year) {
+    const yearThumb = getYearThumbnailUrl(year);
+    return new PlatformChannel({
+        id: fosdemId("fosdem-channel-" + year),
+        name: PLATFORM + " " + year,
+        thumbnail: yearThumb || getChannelThumbnailUrl(),
+        banner: yearThumb || getChannelBannerUrl(),
+        subscribers: 0,
+        description: "FOSDEM " + year + " talks.\n\n" + CHANNEL_DESCRIPTION,
+        url: buildYearChannelUrl(year),
+        links: { "Website": SCHEDULE_BASE_URL + "/" + year + "/" }
+    });
+}
+
+/**
+ * Returns a paginated list of playlists for a single FOSDEM edition.
+ * @param {number} year - FOSDEM edition year
+ * @returns {FOSDEMStaticPlaylistPager}
+ */
+function getYearChannelPlaylists(year) {
+    const items = buildPlaylistsForYear(year);
+    const firstPage = items.slice(0, ITEMS_PER_PAGE);
+    const remaining = items.slice(ITEMS_PER_PAGE);
+    return new FOSDEMStaticPlaylistPager(firstPage, remaining.length > 0, remaining);
+}
+
+/**
  * Creates a PlatformChannel from a speaker API object.
  * @param {Object} speaker - Speaker object with slug, name, biography
  * @returns {PlatformChannel}
  */
 function createPlatformChannelFromSpeaker(speaker) {
     return new PlatformChannel({
-        id: new PlatformID(PLATFORM, FILTER_SPEAKER + "-" + speaker.slug, config.id),
+        id: fosdemId(FILTER_SPEAKER + "-" + speaker.slug),
         name: speaker.name,
         thumbnail: getChannelThumbnailUrl(),
         banner: getChannelBannerUrl(),
@@ -1344,7 +1564,7 @@ function createPlatformChannelFromSpeaker(speaker) {
  * @returns {PlatformChannel}
  */
 function getSpeakerChannel(slug) {
-    const resp = httpGET({ url: SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug), parseResponse: true });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug));
     if (!resp.isOk || !resp.body) {
         throw new ScriptException("Speaker not found: " + slug);
     }
@@ -1360,7 +1580,7 @@ function getSpeakerChannel(slug) {
 function getSpeakerEvents(slug, page) {
     const url = SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug)
         + "/events?page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
-    const resp = httpGET({ url: url, parseResponse: true });
+    const resp = httpGET(url);
     if (!resp.isOk || !resp.body || !resp.body.items) {
         return new FOSDEMSpeakerEventsPager([], false, slug, 1, 0);
     }
@@ -1382,10 +1602,7 @@ function getSpeakerEvents(slug, page) {
  * @returns {FOSDEMStaticPlaylistPager}
  */
 function getSpeakerPlaylists(slug) {
-    const resp = httpGET({
-        url: SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug) + "/categories",
-        parseResponse: true
-    });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug) + "/categories");
     if (!resp.isOk || !resp.body || !resp.body.years || resp.body.years.length === 0) {
         return new FOSDEMStaticPlaylistPager([], false, []);
     }
@@ -1400,7 +1617,7 @@ function getSpeakerPlaylists(slug) {
     for (let i = 0; i < data.years.length; i++) {
         const y = data.years[i];
         playlists.push(new PlatformPlaylist({
-            id: new PlatformID(PLATFORM, "fosdem-" + y.name + "-" + FILTER_SPEAKER + "-" + slug, config.id),
+            id: fosdemId("fosdem-" + y.name + "-" + FILTER_SPEAKER + "-" + slug),
             name: "FOSDEM " + y.name,
             author: author,
             thumbnail: getYearThumbnailUrl(parseInt(y.name)),
@@ -1420,7 +1637,7 @@ function getSpeakerPlaylists(slug) {
         for (let i = 0; i < group.items.length; i++) {
             const item = group.items[i];
             playlists.push(new PlatformPlaylist({
-                id: new PlatformID(PLATFORM, "fosdem-" + item.year + "-" + FILTER_SPEAKER + "-" + slug + "-" + group.filter + "-" + item.name, config.id),
+                id: fosdemId("fosdem-" + item.year + "-" + FILTER_SPEAKER + "-" + slug + "-" + group.filter + "-" + item.name),
                 name: "FOSDEM " + item.year + " - " + capitalize(group.filter) + " " + item.name,
                 author: author,
                 thumbnail: getYearThumbnailUrl(item.year),
