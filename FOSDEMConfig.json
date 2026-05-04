@@ -2,7 +2,7 @@
   "id": "d890ff43-7d9f-4f0e-a52d-239014fd512d",
   "name": "FOSDEM (Alpha)",
   "description": "FOSDEM is a two-day event organised by volunteers to promote the widespread use of free and open source software. Content by FOSDEM (fosdem.org), licensed under CC-BY-2.0-BE.",
-  "version": 3,
+  "version": 4,
   "author": "FUTO",
   "authorUrl": "https://futo.org",
   "platformUrl": "https://fosdem.org",
@@ -58,6 +58,10 @@
     }
   ],
   "changelog": {
+    "4": [
+      "Improvement: Videos from a FOSDEM edition now show that edition's channel as their author;",
+      "Improvement: Per-edition channels (FOSDEM 2026, 2025, ...) in channel search;"
+    ],
     "3": [
       "Fix: Decode percent-encoded speaker slugs to prevent double-encoding;"
     ],
