@@ -331,7 +331,7 @@ source.getContentRecommendations = function (url) {
 
     const recUrl = SEARCH_API_BASE_URL + "/events/" + parsed.year + "/" + encodeURIComponent(parsed.slug)
         + "/recommendations?pageSize=" + ITEMS_PER_PAGE;
-    const resp = httpGET({ url: recUrl, parseResponse: true });
+    const resp = httpGET(recUrl);
     if (!resp.isOk || !resp.body || !resp.body.items) {
         return new FOSDEMApiPager([], false, [], 0, 1, 0);
     }
@@ -404,10 +404,7 @@ source.searchChannelContents = function (channelUrl, query, type, order, filters
 source.searchSuggestions = function (query) {
     if (!query || query.trim().length === 0) return [];
 
-    const response = httpGET({
-        url: SEARCH_API_BASE_URL + "/autocomplete?q=" + encodeURIComponent(query) + "&limit=10",
-        parseResponse: true
-    });
+    const response = httpGET(SEARCH_API_BASE_URL + "/autocomplete?q=" + encodeURIComponent(query) + "&limit=10");
 
     if (!response.isOk || !response.body || !response.body.suggestions) return [];
 
@@ -422,7 +419,7 @@ source.searchSuggestions = function (query) {
  */
 function getEventFromApi(year, slug) {
     const url = SEARCH_API_BASE_URL + "/events/" + year + "/" + encodeURIComponent(slug);
-    const resp = httpGET({ url: url, parseResponse: true });
+    const resp = httpGET(url);
     if (!resp.isOk || !resp.body) return null;
     return resp.body;
 }
@@ -439,7 +436,7 @@ function getEventFromApi(year, slug) {
 function fetchApiEventsPage(year, page, years, yearIndex) {
     const url = SEARCH_API_BASE_URL + "/events?year=" + year
         + "&page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
-    const resp = httpGET({ url: url, parseResponse: true });
+    const resp = httpGET(url);
     if (!resp.isOk || !resp.body || !resp.body.items) {
         return new FOSDEMApiPager([], false, years, yearIndex, page, 0);
     }
@@ -469,7 +466,7 @@ function fetchFilteredEventsPage(year, page, filters) {
     if (type) url += "&" + FILTER_TYPE + "=" + encodeURIComponent(type);
     if (speaker) url += "&" + FILTER_SPEAKER + "=" + encodeURIComponent(speaker);
 
-    const resp = httpGET({ url: url, parseResponse: true });
+    const resp = httpGET(url);
     if (!resp.isOk || !resp.body || !resp.body.items) {
         return new FOSDEMPlaylistContentsPager([], false, year, page, 0, 0, filters);
     }
@@ -492,7 +489,7 @@ function fetchCategoriesForYear(year) {
     const yearStr = String(year);
     if (state.categories[yearStr]) return state.categories[yearStr];
 
-    const resp = httpGET({ url: SEARCH_API_BASE_URL + "/categories?year=" + year, parseResponse: true });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/categories?year=" + year);
     if (!resp.isOk || !resp.body) {
         return { totalEvents: 0, tracks: [], rooms: [], types: [] };
     }
@@ -514,7 +511,7 @@ function fetchCategoriesForYear(year) {
  * @returns {Object} Object with tracks, rooms, types string arrays
  */
 function fetchSearchFilters() {
-    const resp = httpGET({ url: SEARCH_API_BASE_URL + "/categories", parseResponse: true });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/categories");
     if (!resp.isOk || !resp.body) {
         return { tracks: [], rooms: [], types: [] };
     }
@@ -628,7 +625,7 @@ function searchApi(query, page, filters) {
         if (filters[FILTER_TYPE] && filters[FILTER_TYPE].length > 0) url += "&" + FILTER_TYPE + "=" + encodeURIComponent(filters[FILTER_TYPE][0]);
     }
 
-    const response = httpGET({ url: url, parseResponse: true });
+    const response = httpGET(url);
 
     if (!response.isOk || !response.body) {
         return new FOSDEMSearchPager([], false, query, page, 0, filters);
@@ -656,7 +653,7 @@ function searchPlaylistsApi(query, page) {
     const url = SEARCH_API_BASE_URL + "/categories/search?q=" + encodeURIComponent(query)
         + "&page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
 
-    const response = httpGET({ url: url, parseResponse: true });
+    const response = httpGET(url);
 
     if (!response.isOk || !response.body) {
         return new FOSDEMSearchPlaylistPager([], false, query, page, 0);
@@ -688,7 +685,7 @@ function searchSpeakersApi(query, page) {
     const url = SEARCH_API_BASE_URL + "/speakers/search?q=" + encodeURIComponent(query)
         + "&page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
 
-    const response = httpGET({ url: url, parseResponse: true });
+    const response = httpGET(url);
 
     if (!response.isOk || !response.body) {
         return new FOSDEMSpeakerSearchPager([], false, query, page, 0);
@@ -926,45 +923,31 @@ class FOSDEMStaticPlaylistPager extends PlaylistPager {
 // ==========================================================================
 
 /**
- * Performs an HTTP GET request with default headers and error handling.
- * @param {Object} options - Request options
- * @param {string} options.url - The URL to fetch
- * @param {boolean} [options.parseResponse=false] - If true, parse response body as JSON
- * @param {Object} [options.headers=null] - Custom headers (overrides defaults)
+ * Performs an HTTP GET request with default headers and JSON parsing.
+ * @param {string} url - The URL to fetch
  * @returns {Object} Response object with isOk, code, body, and headers
  */
-function httpGET(options) {
-    const {
-        url,
-        parseResponse = false,
-        headers = null
-    } = options;
-
-    const localHeaders = headers ?? REQUEST_HEADERS;
-
+function httpGET(url) {
     try {
-        const response = http.GET(url, localHeaders, false);
+        const response = http.GET(url, REQUEST_HEADERS, false);
 
         if (!response.isOk) {
             log("HTTP request failed: " + url + " (code: " + response.code + ")");
             return response;
         }
 
-        if (parseResponse) {
-            try {
-                const parsed = JSON.parse(response.body);
-                return {
-                    code: response.code,
-                    isOk: response.isOk,
-                    body: parsed,
-                    headers: response.headers
-                };
-            } catch (e) {
-                log("Failed to parse JSON from: " + url + " - " + e.message);
-            }
+        try {
+            const parsed = JSON.parse(response.body);
+            return {
+                code: response.code,
+                isOk: response.isOk,
+                body: parsed,
+                headers: response.headers
+            };
+        } catch (e) {
+            log("Failed to parse JSON from: " + url + " - " + e.message);
+            return { isOk: false, code: response.code, body: null, headers: response.headers };
         }
-
-        return response;
     } catch (e) {
         log("HTTP request error: " + url + " - " + e.message);
         return { isOk: false, code: 0, body: "", headers: {} };
@@ -980,7 +963,7 @@ function fetchEditions() {
         return;
     }
 
-    const resp = httpGET({ url: SEARCH_API_BASE_URL + "/editions", parseResponse: true });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/editions");
     if (!resp.isOk || !resp.body || !resp.body.editions) {
         log("Failed to fetch editions from API");
         return;
@@ -1556,7 +1539,7 @@ function createPlatformChannelFromSpeaker(speaker) {
  * @returns {PlatformChannel}
  */
 function getSpeakerChannel(slug) {
-    const resp = httpGET({ url: SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug), parseResponse: true });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug));
     if (!resp.isOk || !resp.body) {
         throw new ScriptException("Speaker not found: " + slug);
     }
@@ -1572,7 +1555,7 @@ function getSpeakerChannel(slug) {
 function getSpeakerEvents(slug, page) {
     const url = SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug)
         + "/events?page=" + page + "&pageSize=" + ITEMS_PER_PAGE;
-    const resp = httpGET({ url: url, parseResponse: true });
+    const resp = httpGET(url);
     if (!resp.isOk || !resp.body || !resp.body.items) {
         return new FOSDEMSpeakerEventsPager([], false, slug, 1, 0);
     }
@@ -1594,10 +1577,7 @@ function getSpeakerEvents(slug, page) {
  * @returns {FOSDEMStaticPlaylistPager}
  */
 function getSpeakerPlaylists(slug) {
-    const resp = httpGET({
-        url: SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug) + "/categories",
-        parseResponse: true
-    });
+    const resp = httpGET(SEARCH_API_BASE_URL + "/speakers/" + encodeURIComponent(slug) + "/categories");
     if (!resp.isOk || !resp.body || !resp.body.years || resp.body.years.length === 0) {
         return new FOSDEMStaticPlaylistPager([], false, []);
     }
