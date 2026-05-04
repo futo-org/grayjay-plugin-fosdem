@@ -950,8 +950,32 @@ function httpGET(url) {
         }
     } catch (e) {
         log("HTTP request error: " + url + " - " + e.message);
-        return { isOk: false, code: 0, body: "", headers: {} };
+        return { isOk: false, code: 0, body: null, headers: {} };
     }
+}
+
+/**
+ * Safely extracts URL search parameters.
+ * @param {string} url - Absolute URL
+ * @returns {URLSearchParams|null} Parsed search parameters, or null for invalid URLs
+ */
+function getSearchParams(url) {
+    try {
+        return new URL(url).searchParams;
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Safely extracts one URL search parameter.
+ * @param {string} url - Absolute URL
+ * @param {string} name - Search parameter name
+ * @returns {string|null} Parameter value, or null when missing or invalid
+ */
+function getSearchParam(url, name) {
+    const params = getSearchParams(url);
+    return params ? params.get(name) : null;
 }
 
 /**
@@ -1036,7 +1060,7 @@ function parseContentUrl(url) {
     let match = url.match(CONTENT_DETAILS_URL_REGEX);
     if (match) {
         const result = { year: match[1], slug: match[2] };
-        const speakerSlug = new URL(url).searchParams.get("speakerSlug");
+        const speakerSlug = getSearchParam(url, "speakerSlug");
         if (speakerSlug) result.speakerSlug = speakerSlug;
         return result;
     }
@@ -1076,11 +1100,7 @@ function getYearFromChannelUrl(url) {
     if (!url) return null;
     const m = url.match(PLAYLIST_URL_REGEX);
     if (!m || !m[2] || m[2].indexOf("channel=") < 0) return null;
-    try {
-        if (new URL(url).searchParams.get("channel") !== "1") return null;
-    } catch (e) {
-        return null;
-    }
+    if (getSearchParam(url, "channel") !== "1") return null;
     return parseInt(m[1], 10);
 }
 
@@ -1094,7 +1114,8 @@ function parsePlaylistUrl(url) {
     if (!match) return null;
 
     const result = { year: parseInt(match[1]) };
-    const params = new URL(url).searchParams;
+    const params = getSearchParams(url);
+    if (!params) return null;
     if (params.has(FILTER_TRACK)) result.track = params.get(FILTER_TRACK);
     if (params.has(FILTER_ROOM)) result.room = params.get(FILTER_ROOM);
     if (params.has(FILTER_TYPE)) result.type = params.get(FILTER_TYPE);
@@ -1121,7 +1142,7 @@ function buildVideoSources(event, durationSeconds) {
             name: "MP4",
             url: event.mp4Url,
             width: 1920, height: 1080,
-            container: "video/mp4", 
+            container: "video/mp4",
             codec: "h264",
             duration: durationSeconds
         });
@@ -1134,7 +1155,7 @@ function buildVideoSources(event, durationSeconds) {
         const webmSource = new VideoUrlSource({
             name: isAv1 ? "AV1/WebM" : "WebM",
             url: event.webmUrl,
-            width: 1920, 
+            width: 1920,
             height: 1080,
             container: "video/webm",
             codec: isAv1 ? "av1" : "vp9",
@@ -1274,9 +1295,13 @@ function formatMetadataLink(label, filterType, value, year) {
  */
 function appendSpeakerHint(url, slug) {
     if (!url || !slug) return url;
-    const u = new URL(url);
-    u.searchParams.set("speakerSlug", slug);
-    return u.toString();
+    try {
+        const u = new URL(url);
+        u.searchParams.set("speakerSlug", slug);
+        return u.toString();
+    } catch (e) {
+        return url;
+    }
 }
 
 /**
