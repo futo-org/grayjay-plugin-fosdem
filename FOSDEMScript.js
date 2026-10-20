@@ -26,6 +26,9 @@ const IS_ANDROID = bridge.buildPlatform === "android";
 const CATEGORY_FILTERS = ["track", "room", "type"];
 const SEARCH_FILTERS = ["year", ...CATEGORY_FILTERS, "speaker"];
 
+// links=browser points post links that cannot open in-app at www.fosdem.org; Grayjay never falls back to the browser
+const BROWSER_LINKS = "browser";
+
 // Neither host defines these, but both accept the values (ResultCapabilities.TYPE_POSTS on Android)
 Type.Feed.Playlists = "Playlists";
 Type.Feed.Posts = "POSTS";
@@ -366,9 +369,9 @@ function pageResult(data, page, results) {
     return { results, hasMore: page < data.totalPages, nextCursor: page + 1 };
 }
 
-/** Parameters that mix news posts into talk results. */
+/** Parameters that mix news posts into talk results; links=browser goes with them, as posts carry the links. */
 function postParams(includePosts) {
-    return includePosts ? { include: "posts" } : {};
+    return includePosts ? { include: "posts", links: BROWSER_LINKS } : {};
 }
 
 /**
@@ -381,7 +384,7 @@ function fetchEvent(year, slug, speakerSlug) {
 
 /** Fetches a news post, or null when it does not exist. */
 function fetchPost(year, slug) {
-    return httpGET({ url: apiUrl(`/posts/${year}/${encodeURIComponent(slug)}`), nullOnNotFound: true });
+    return httpGET({ url: apiUrl(`/posts/${year}/${encodeURIComponent(slug)}`, { links: BROWSER_LINKS }), nullOnNotFound: true });
 }
 
 /**
@@ -394,7 +397,7 @@ function fetchEventsPage({ year, includePosts = false, author }, page) {
 }
 
 function fetchPostsPage(year, author, page) {
-    const data = fetchApiPage("/posts", page, { year });
+    const data = fetchApiPage("/posts", page, { links: BROWSER_LINKS, year });
     return pageResult(data, page, data.items.map((post) => createNewsPost(post, author)));
 }
 
