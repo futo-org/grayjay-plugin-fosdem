@@ -22,7 +22,7 @@ const IS_ANDROID = bridge.buildPlatform === "android";
 
 // Talk filters shared by edition playlist URLs and search
 const CATEGORY_FILTERS = ["track", "room", "type"];
-const SEARCH_FILTERS = ["year", ...CATEGORY_FILTERS];
+const SEARCH_FILTERS = ["year", ...CATEGORY_FILTERS, "speaker"];
 
 // Neither host defines this, but both accept the value
 Type.Feed.Playlists = "Playlists";
@@ -277,8 +277,11 @@ source.searchChannelContents = function (channelUrl, query, type, order, filters
 
     const channelFilters = { ...filters };
 
+    const speakerSlug = getSpeakerSlugFromUrl(channelUrl);
     const year = getYearFromChannelUrl(channelUrl);
-    if (year) {
+    if (speakerSlug) {
+        channelFilters.speaker = [speakerSlug];
+    } else if (year) {
         channelFilters.year = [String(year)];
     }
     return new FOSDEMPager(1, (page) => fetchSearchPage(query, channelFilters, page));
