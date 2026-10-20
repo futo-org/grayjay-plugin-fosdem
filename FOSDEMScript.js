@@ -187,12 +187,15 @@ source.getContentDetails = function (url) {
         throw new ScriptException(`Event not found: ${parsed.slug}`);
     }
 
-    if (!event.mp4Url && !event.webmUrl) {
-        throw new ScriptException("No video sources available for this event");
-    }
-
     const author = event.speakerName ? speakerAuthor(event.speakerSlug, event.speakerName) : null;
-    return createTalkVideo(event, author);
+    const details = createTalkVideo(event, author);
+    // Without sources the mapper returns a PlatformVideo, which neither app accepts as details
+    if (!(details instanceof PlatformVideoDetails)) {
+        throw new ScriptException(event.mp4Url || event.webmUrl
+            ? "This talk is only available in formats turned off in the plugin settings (MP4, WebM)"
+            : "No video sources available for this event");
+    }
+    return details;
 };
 
 /** Recommendations only enrich the details page, so a failed request returns an empty pager. */
