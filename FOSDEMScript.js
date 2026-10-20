@@ -18,14 +18,17 @@ const ITEMS_PER_PAGE = 20;
 const SUGGESTION_LIMIT = 10;
 const VIDEO_WIDTH = 1920;
 const VIDEO_HEIGHT = 1080;
+// Post images keep their width and height attributes; this caps them at the post width on Desktop
+const DESKTOP_POST_IMAGE_STYLE = "max-width:100%;height:auto";
 const IS_ANDROID = bridge.buildPlatform === "android";
 
 // Talk filters shared by edition playlist URLs and search
 const CATEGORY_FILTERS = ["track", "room", "type"];
 const SEARCH_FILTERS = ["year", ...CATEGORY_FILTERS, "speaker"];
 
-// Neither host defines this, but both accept the value
+// Neither host defines these, but both accept the values (ResultCapabilities.TYPE_POSTS on Android)
 Type.Feed.Playlists = "Playlists";
+Type.Feed.Posts = "POSTS";
 
 /**
  * Matches talk pages on fosdem.org or archive.fosdem.org and captures the year and slug.
@@ -49,10 +52,28 @@ const CHANNEL_URL_REGEX = /^https?:\/\/video\.fosdem\.org\/?$/;
 const SPEAKER_URL_REGEX = /^https?:\/\/(?:archive\.)?fosdem\.org\/(?:\d{4}\/)?schedule\/speaker\/([^\/?#]+)/i;
 
 /**
+ * Matches news posts on fosdem.org or archive.fosdem.org and captures the year and slug.
+ * Only claimed with the POST_URL_PARAM marker (see isPostUrl).
+ * @example https://fosdem.org/2027/news/call-for-main-track/
+ */
+const NEWS_URL_REGEX = /^https?:\/\/(?:archive\.)?fosdem\.org\/(\d{4})\/news\/([^\/?#]+)/i;
+
+const IMAGE_TAG_REGEX = /<img\b[^>]*>/gi;
+// Tag openings in post HTML, for adding attributes
+const IMAGE_TAG_OPEN_REGEX = /<img\b/gi;
+const LINK_TAG_OPEN_REGEX = /<a\b/gi;
+
+/**
  * Matches edition playlist URLs and captures the year and the optional filter query.
  * @example https://video.fosdem.org/2026/?track=Python
  */
 const PLAYLIST_URL_REGEX = /^https?:\/\/video\.fosdem\.org\/(\d{4})\/?(\?[^#]*)?$/;
+
+/**
+ * Query parameter (value "1") that marks a news post URL as one this plugin opens in-app.
+ * Plain news URLs are left to the browser: Android opens claimed content URLs in the video player, which rejects posts.
+ */
+const POST_URL_PARAM = "post";
 
 /** Query parameter (value "1") that tells a year channel apart from the edition playlist, which uses the same path. */
 const CHANNEL_URL_PARAM = "channel";
@@ -91,9 +112,9 @@ source.saveState = function () {
     });
 };
 
-/** Talks of every edition, newest first. */
+/** Talks and news posts of every edition, newest first. */
 source.getHome = function () {
-    return new FOSDEMPager(1, (page) => fetchEventsPage({}, page));
+    return new FOSDEMPager(1, (page) => fetchEventsPage({ includePosts: true }, page));
 };
 
 /** Matches the main channel, a year channel (/{year}/?channel=1) or a speaker profile URL. */
@@ -117,13 +138,18 @@ source.getChannel = function (url) {
     return createMainChannel();
 };
 
+/**
+ * Neither Mixed nor Subscriptions is declared, so the apps fetch subscriptions per type and honour each
+ * subscription's Videos and Posts settings, and merge the two types on channel pages.
+ */
 source.getChannelCapabilities = function () {
     return {
-        types: [Type.Feed.Videos, Type.Feed.Playlists],
+        types: [Type.Feed.Videos, Type.Feed.Posts, Type.Feed.Playlists],
         sorts: [Type.Order.Chronological]
     };
 };
 
+/** Speaker channels have no posts: Posts is empty, and Subscriptions and Mixed return talks only. */
 source.getChannelContents = function (url, type, order, filters) {
     if (type === Type.Feed.Playlists) {
         return source.getChannelPlaylists(url);
@@ -131,6 +157,9 @@ source.getChannelContents = function (url, type, order, filters) {
 
     const speakerSlug = getSpeakerSlugFromUrl(url);
     if (speakerSlug) {
+        if (type === Type.Feed.Posts) {
+            return new ContentPager([], false);
+        }
         return new FOSDEMPager(1, (page) => fetchSpeakerEventsPage(speakerSlug, page));
     }
 
@@ -138,7 +167,11 @@ source.getChannelContents = function (url, type, order, filters) {
     const year = getYearFromChannelUrl(url);
     // The apps cache subscription items by author URL, so main-channel items carry the main channel as author
     const author = year ? null : mainAuthor();
-    return new FOSDEMPager(1, (page) => fetchEventsPage({ year, author }, page));
+    if (type === Type.Feed.Posts) {
+        return new FOSDEMPager(1, (page) => fetchPostsPage(year, author, page));
+    }
+    const includePosts = type === Type.Feed.Subscriptions || type === Type.Feed.Mixed;
+    return new FOSDEMPager(1, (page) => fetchEventsPage({ year, includePosts, author }, page));
 };
 
 source.getChannelPlaylists = function (url) {
@@ -173,10 +206,19 @@ source.getPlaylist = function (url) {
 };
 
 source.isContentDetailsUrl = function (url) {
-    return CONTENT_DETAILS_URL_REGEX.test(url) || VIDEO_FILE_URL_REGEX.test(url);
+    return CONTENT_DETAILS_URL_REGEX.test(url) || VIDEO_FILE_URL_REGEX.test(url) || isPostUrl(url);
 };
 
 source.getContentDetails = function (url) {
+    const newsMatch = isPostUrl(url) ? url.match(NEWS_URL_REGEX) : null;
+    if (newsMatch) {
+        const post = fetchPost(newsMatch[1], decodeSlug(newsMatch[2]));
+        if (!post) {
+            throw new ScriptException(`Post not found: ${newsMatch[2]}`);
+        }
+        return createNewsPost(post);
+    }
+
     const parsed = parseContentUrl(url);
     if (!parsed) {
         throw new ScriptException(`Invalid content URL: ${url}`);
@@ -220,7 +262,7 @@ source.getContentRecommendations = function (url) {
 
 source.getSearchCapabilities = function () {
     return new ResultCapabilities(
-        [Type.Feed.Videos, Type.Feed.Playlists],
+        [Type.Feed.Videos, Type.Feed.Mixed, Type.Feed.Playlists],
         [],
         [createYearFilterGroup(), ...buildCategoryFilterGroups()]
     );
@@ -231,7 +273,8 @@ source.search = function (query, type, order, filters) {
         return new ContentPager([], false);
     }
 
-    return new FOSDEMPager(1, (page) => fetchSearchPage(query, filters, page));
+    const includePosts = type !== Type.Feed.Videos;
+    return new FOSDEMPager(1, (page) => fetchSearchPage(query, filters, includePosts, page));
 };
 
 source.searchPlaylists = function (query) {
@@ -254,7 +297,7 @@ source.searchChannels = function (query) {
 /** The year filter is left out because a year channel implies it. */
 source.getSearchChannelContentsCapabilities = function () {
     return new ResultCapabilities(
-        [Type.Feed.Videos],
+        [Type.Feed.Mixed, Type.Feed.Videos],
         [],
         buildCategoryFilterGroups()
     );
@@ -266,15 +309,19 @@ source.searchChannelContents = function (channelUrl, query, type, order, filters
     }
 
     const channelFilters = { ...filters };
+    // Desktop passes no type and keeps only the videos of the first page, so posts would appear from page 2 on
+    let includePosts = type ? type !== Type.Feed.Videos : IS_ANDROID;
 
     const speakerSlug = getSpeakerSlugFromUrl(channelUrl);
     const year = getYearFromChannelUrl(channelUrl);
     if (speakerSlug) {
+        // Speaker channels have no posts
         channelFilters.speaker = [speakerSlug];
+        includePosts = false;
     } else if (year) {
         channelFilters.year = [String(year)];
     }
-    return new FOSDEMPager(1, (page) => fetchSearchPage(query, channelFilters, page));
+    return new FOSDEMPager(1, (page) => fetchSearchPage(query, channelFilters, includePosts, page));
 };
 
 /** Suggestions are best effort, so failures return none. */
@@ -319,6 +366,11 @@ function pageResult(data, page, results) {
     return { results, hasMore: page < data.totalPages, nextCursor: page + 1 };
 }
 
+/** Parameters that mix news posts into talk results. */
+function postParams(includePosts) {
+    return includePosts ? { include: "posts" } : {};
+}
+
 /**
  * Fetches a talk, or null when it does not exist. With speakerSlug naming one of its speakers,
  * the API sets speakerName and speakerSlug to that speaker's profile.
@@ -327,13 +379,23 @@ function fetchEvent(year, slug, speakerSlug) {
     return httpGET({ url: apiUrl(`/events/${year}/${encodeURIComponent(slug)}`, { speaker: speakerSlug }), nullOnNotFound: true });
 }
 
+/** Fetches a news post, or null when it does not exist. */
+function fetchPost(year, slug) {
+    return httpGET({ url: apiUrl(`/posts/${year}/${encodeURIComponent(slug)}`), nullOnNotFound: true });
+}
+
 /**
  * Fetches one page of /events, newest first. Without a year it covers every edition;
  * the author defaults to each item's year channel.
  */
-function fetchEventsPage({ year, author }, page) {
-    const data = fetchApiPage("/events", page, { year });
-    return pageResult(data, page, data.items.map((item) => createTalkVideo(item, author)));
+function fetchEventsPage({ year, includePosts = false, author }, page) {
+    const data = fetchApiPage("/events", page, { year, ...postParams(includePosts) });
+    return pageResult(data, page, data.items.map((item) => createContent(item, author)));
+}
+
+function fetchPostsPage(year, author, page) {
+    const data = fetchApiPage("/posts", page, { year });
+    return pageResult(data, page, data.items.map((post) => createNewsPost(post, author)));
 }
 
 /** One page of an edition playlist, plus totalResults and speakerAuthor (set when the API knows the speaker's name). */
@@ -363,15 +425,16 @@ function fetchCategoryListPage(year, speakerSlug, page) {
     return pageResult(data, page, data.items.map((item) => createPlaylistFromCategoryMatch(item, speakerSlug, author)));
 }
 
-function fetchSearchPage(query, filters, page) {
-    const params = { q: query };
+/** The API leaves posts out when a track, room, type or speaker filter is set. */
+function fetchSearchPage(query, filters, includePosts, page) {
+    const params = { q: query, ...postParams(includePosts) };
     for (const filterName of SEARCH_FILTERS) {
         if (filters && filters[filterName]) {
             params[filterName] = filters[filterName][0];
         }
     }
     const data = fetchApiPage("/search", page, params);
-    return pageResult(data, page, data.items.map((item) => createTalkVideo(item)));
+    return pageResult(data, page, data.items.map((item) => createContent(item)));
 }
 
 function fetchPlaylistSearchPage(query, page) {
@@ -793,6 +856,11 @@ function withSpeakerHint(event, speakerSlug) {
     return { ...event, url: setSearchParam(event.url, "speakerSlug", speakerSlug) };
 }
 
+/** News post URLs open in-app only with the POST_URL_PARAM marker. */
+function isPostUrl(url) {
+    return NEWS_URL_REGEX.test(url) && getSearchParams(url).get(POST_URL_PARAM) === "1";
+}
+
 function fosdemId(suffix) {
     return new PlatformID(PLATFORM, suffix, config.id);
 }
@@ -861,6 +929,69 @@ function createTalkVideo(event, author) {
     const details = new PlatformVideoDetails(fields);
     details.getContentRecommendations = () => source.getContentRecommendations(event.url);
     return details;
+}
+
+/** Items of talk-only listings carry no contentType. */
+function createContent(item, author) {
+    if (item.contentType === "post") {
+        return createNewsPost(item, author);
+    }
+    return createTalkVideo(item, author);
+}
+
+function buildPostContent(post) {
+    return (post.contentHtml || `<p>${escapeHtml(post.summary)}</p>`)
+        + `\n<p><a href="${escapeHtml(post.url)}">Read on fosdem.org</a></p>`
+        + "\n<p>Published by FOSDEM (fosdem.org). Licensing is edition-specific; see the original post.</p>";
+}
+
+/**
+ * The ID uses year and slug, which stay stable when the post moves between the feed and the archive.
+ * The URL carries the POST_URL_PARAM marker so the app opens it here; shareUrl stays the fosdem.org page.
+ */
+function createNewsPost(post, author) {
+    const label = post.category === "cfp" ? "Call for participation" : "News";
+    let content = buildPostContent(post);
+    let images = [];
+    // Android renders post HTML without inline images and shows only these arrays; Desktop shows both
+    if (IS_ANDROID) {
+        images = post.imageUrls || [];
+        content = content.replace(IMAGE_TAG_REGEX, "");
+    } else {
+        // Desktop injects the HTML into the app page: scale images to the post width and keep links out of the app frame
+        content = content
+            .replace(IMAGE_TAG_OPEN_REGEX, `<img style="${DESKTOP_POST_IMAGE_STYLE}"`)
+            .replace(LINK_TAG_OPEN_REGEX, '<a target="_blank"');
+    }
+    const details = new PlatformPostDetails({
+        id: fosdemId(`news-${post.year}-${post.slug}`),
+        name: buildPostName(post),
+        // Post images have no known height; the quality value only orders thumbnails of one image
+        thumbnails: images.map((imageUrl) => new Thumbnails([new Thumbnail(imageUrl, 0)])),
+        images,
+        author: author || yearAuthor(post.year),
+        datetime: parseEventDate(post.date),
+        url: setSearchParam(post.url, POST_URL_PARAM, "1"),
+        description: `${label}: ${post.summary}`,
+        textType: Type.Text.HTML,
+        content,
+        // FOSDEM posts have no likes; without this the constructor defaults to RatingLikes(-1)
+        rating: new RatingLikes(0)
+    });
+    // The PlatformPost constructor drops shareUrl; both apps read it from the object
+    details.shareUrl = post.url;
+    return details;
+}
+
+/**
+ * Appends " (FOSDEM {year})" unless the title has the year. The apps drop feed items whose title matches
+ * another item's within a date window, which would hide posts that FOSDEM republishes every year.
+ */
+function buildPostName(post) {
+    if (post.title.includes(String(post.year))) {
+        return post.title;
+    }
+    return `${post.title} (FOSDEM ${post.year})`;
 }
 
 /** The speaker filter stays in the playlist ID and URL; the author defaults to the main channel. */
