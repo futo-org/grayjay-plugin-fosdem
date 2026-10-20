@@ -31,14 +31,14 @@ Type.Feed.Playlists = "Playlists";
  * Matches talk pages on fosdem.org or archive.fosdem.org and captures the year and slug.
  * @example https://fosdem.org/2025/schedule/event/fosdem-2025-6712-welcome-to-fosdem-2025/
  */
-const CONTENT_DETAILS_URL_REGEX = /(?:archive\.)?fosdem\.org\/(\d{4})\/schedule\/event\/([^\/]+)/;
+const CONTENT_DETAILS_URL_REGEX = /^https?:\/\/(?:archive\.)?fosdem\.org\/(\d{4})\/schedule\/event\/([^\/?#]+)/i;
 
 /**
  * Matches direct video file URLs on video.fosdem.org.
  * Captures: Group 1 = year, Group 2 = room directory, Group 3 = slug (without extension)
  * @example https://video.fosdem.org/2025/janson/fosdem-2025-6712-welcome-to-fosdem-2025.mp4
  */
-const VIDEO_FILE_URL_REGEX = /video\.fosdem\.org\/(\d{4})\/([^\/]+)\/([^\/]+?)(?:\.av1)?\.(?:mp4|webm|vtt)/;
+const VIDEO_FILE_URL_REGEX = /^https?:\/\/video\.fosdem\.org\/(\d{4})\/([^\/?#]+)\/([^\/?#]+?)(?:\.av1)?\.(?:mp4|webm|vtt)(?:[?#].*)?$/;
 
 const CHANNEL_URL_REGEX = /^https?:\/\/video\.fosdem\.org\/?$/;
 
@@ -46,13 +46,13 @@ const CHANNEL_URL_REGEX = /^https?:\/\/video\.fosdem\.org\/?$/;
  * Matches fosdem.org speaker pages, with or without a year, and captures the speaker slug.
  * @example https://fosdem.org/2026/schedule/speaker/michiel_leenaars/
  */
-const SPEAKER_URL_REGEX = /fosdem\.org\/(?:\d{4}\/)?schedule\/speaker\/([^\/]+)/;
+const SPEAKER_URL_REGEX = /^https?:\/\/(?:archive\.)?fosdem\.org\/(?:\d{4}\/)?schedule\/speaker\/([^\/?#]+)/i;
 
 /**
  * Matches edition playlist URLs and captures the year and the optional filter query.
  * @example https://video.fosdem.org/2026/?track=Python
  */
-const PLAYLIST_URL_REGEX = /video\.fosdem\.org\/(\d{4})\/?(\?[^#]*)?$/;
+const PLAYLIST_URL_REGEX = /^https?:\/\/video\.fosdem\.org\/(\d{4})\/?(\?[^#]*)?$/;
 
 /** Query parameter (value "1") that tells a year channel apart from the edition playlist, which uses the same path. */
 const CHANNEL_URL_PARAM = "channel";
@@ -652,12 +652,12 @@ function parseEventDate(isoDate) {
 function parseContentUrl(url) {
     let match = url.match(CONTENT_DETAILS_URL_REGEX);
     if (match) {
-        return { year: match[1], slug: match[2], speakerSlug: getSearchParams(url).get("speakerSlug") };
+        return { year: match[1], slug: decodeSlug(match[2]), speakerSlug: getSearchParams(url).get("speakerSlug") };
     }
 
     match = url.match(VIDEO_FILE_URL_REGEX);
     if (match) {
-        return { year: match[1], slug: match[3] };
+        return { year: match[1], slug: decodeSlug(match[3]) };
     }
 
     return null;
