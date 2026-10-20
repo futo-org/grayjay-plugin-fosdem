@@ -4,13 +4,15 @@ const SCHEDULE_BASE_URL = "https://fosdem.org";
 const SEARCH_API_BASE_URL = "https://api.opensource-tv.com";
 const CHANNEL_THUMBNAIL_URL = "https://plugins.grayjay.app/FOSDEM/FOSDEMIcon.png";
 const EDITIONS_TTL_MS = 60 * 60 * 1000;
+const EDITIONS_RETRY_MS = 60 * 1000; // Wait before requesting editions again after a failed or empty response
 const LICENSE_NOTICE = "Content by FOSDEM (fosdem.org), licensed under CC-BY-2.0-BE.";
 const CHANNEL_DESCRIPTION = `FOSDEM is a free event for software developers to meet, share ideas and collaborate. Every year, thousands of developers of free and open source software from all over the world gather at the event in Brussels.\n\n${LICENSE_NOTICE}`;
 
 const REQUEST_HEADERS = {
-    "Content-Type": "application/json",
     "User-Agent": `grayjay.app/${bridge.buildPlatform}/${bridge.buildVersion}`
 };
+const REQUEST_RETRIES = 2;
+const RATE_LIMIT_WAIT_MS = 5000;
 
 const ITEMS_PER_PAGE = 20;
 const SUGGESTION_LIMIT = 10;
@@ -62,6 +64,8 @@ let state = {
     // Tracks, rooms and types per year: { [year]: { totalEvents, tracks, rooms, types } }
     categories: {}
 };
+// Not persisted, so a restarted plugin requests editions right away
+let editionsRetryAt = 0;
 
 /** Restores the saved editions and categories caches, then refreshes editions if older than EDITIONS_TTL_MS. */
 source.enable = function (pluginConfig, pluginSettings, savedState) {
@@ -204,16 +208,20 @@ source.getContentDetails = function (url) {
     return createTalkVideo(event, author);
 };
 
+/** Recommendations only enrich the details page, so a failed request returns an empty pager. */
 source.getContentRecommendations = function (url) {
     const parsed = parseContentUrl(url);
     if (!parsed) {
         return new ContentPager([], false);
     }
 
-    const data = httpGET({
-        url: apiUrl(`/events/${parsed.year}/${encodeURIComponent(parsed.slug)}/recommendations`, { pageSize: ITEMS_PER_PAGE })
-    });
-    if (!data) {
+    let data;
+    try {
+        data = httpGET({
+            url: apiUrl(`/events/${parsed.year}/${encodeURIComponent(parsed.slug)}/recommendations`, { pageSize: ITEMS_PER_PAGE })
+        });
+    } catch (error) {
+        log(`Failed to fetch recommendations: ${error.message}`);
         return new ContentPager([], false);
     }
 
@@ -276,13 +284,21 @@ source.searchChannelContents = function (channelUrl, query, type, order, filters
     return new FOSDEMPager(1, (page) => fetchSearchPage(query, channelFilters, page));
 };
 
+/** Suggestions are best effort, so failures return none. */
 source.searchSuggestions = function (query) {
     if (isBlank(query)) {
         return [];
     }
 
-    const data = httpGET({ url: apiUrl("/autocomplete", { q: query, limit: SUGGESTION_LIMIT }) });
-    if (!data) {
+    let data;
+    try {
+        // No retries: suggestions are requested while typing and a rate-limit wait would stall the search box
+        data = httpGET({
+            url: apiUrl("/autocomplete", { q: query, limit: SUGGESTION_LIMIT }),
+            retries: 0
+        });
+    } catch (error) {
+        log(`Failed to fetch search suggestions: ${error.message}`);
         return [];
     }
 
@@ -302,10 +318,8 @@ function apiUrl(path, params = {}) {
     return SEARCH_API_BASE_URL + path + (query ? "?" + query : "");
 }
 
-/** A failed request gives an empty last page. */
 function fetchApiPage(path, page, params = {}) {
-    const data = httpGET({ url: apiUrl(path, { page, pageSize: ITEMS_PER_PAGE, ...params }) });
-    return data || { items: [], totalPages: 0, totalResults: 0 };
+    return httpGET({ url: apiUrl(path, { page, pageSize: ITEMS_PER_PAGE, ...params }) });
 }
 
 function pageResult(data, page, results) {
@@ -313,11 +327,11 @@ function pageResult(data, page, results) {
 }
 
 /**
- * Fetches a talk, or null when the request fails. With speakerSlug naming one of its speakers,
+ * Fetches a talk, or null when it does not exist. With speakerSlug naming one of its speakers,
  * the API sets speakerName and speakerSlug to that speaker's profile.
  */
 function fetchEvent(year, slug, speakerSlug) {
-    return httpGET({ url: apiUrl(`/events/${year}/${encodeURIComponent(slug)}`, { speaker: speakerSlug }) });
+    return httpGET({ url: apiUrl(`/events/${year}/${encodeURIComponent(slug)}`, { speaker: speakerSlug }), nullOnNotFound: true });
 }
 
 /** Fetches one page of an edition's talks, newest first, each with its year channel as author. */
@@ -391,9 +405,6 @@ function fetchCategoriesForYear(year) {
     const key = String(year);
     if (!state.categories[key]) {
         const data = httpGET({ url: apiUrl("/categories", { year }) });
-        if (!data) {
-            return { totalEvents: 0, tracks: [], rooms: [], types: [] };
-        }
         state.categories[key] = { totalEvents: data.totalEvents, tracks: data.tracks, rooms: data.rooms, types: data.types };
     }
     return state.categories[key];
@@ -402,9 +413,6 @@ function fetchCategoriesForYear(year) {
 /** Edition, track, room and type playlists of a speaker's talks, newest year first. An unknown speaker has none. */
 function fetchSpeakerPlaylists(slug) {
     const data = httpGET({ url: apiUrl(`/speakers/${encodeURIComponent(slug)}/categories`) });
-    if (!data) {
-        return [];
-    }
     const author = speakerAuthor(slug, data.speakerName || slug);
     const items = data.years.map((entry) => ({ category: "edition", name: `FOSDEM ${entry.name}`, year: parseInt(entry.name, 10), count: entry.count }));
     for (const category of CATEGORY_FILTERS) {
@@ -469,9 +477,13 @@ function findFosdemChannels(query) {
     return channels;
 }
 
+/** Filters only enrich the search capabilities, so a failed request returns empty lists. */
 function fetchSearchFilters() {
-    const data = httpGET({ url: apiUrl("/categories") });
-    if (!data) {
+    let data;
+    try {
+        data = httpGET({ url: apiUrl("/categories") });
+    } catch (error) {
+        log(`Failed to fetch search filters: ${error.message}`);
         return { tracks: [], rooms: [], types: [] };
     }
     return {
@@ -502,26 +514,56 @@ function createFilterGroup(name, id, values) {
     return new FilterGroup(name, values.map((value) => new FilterCapability(value, value, value)), false, id);
 }
 
-/** GET with the default headers, returning the parsed JSON, or null after logging a failed request. */
-function httpGET({ url }) {
-    let response;
-    try {
-        response = http.GET(url, REQUEST_HEADERS, false);
-    } catch (error) {
-        log(`Request error on ${url}: ${error}`);
-        return null;
+/**
+ * GET with the default headers, returning the parsed JSON. Network errors, timeouts, 429 and 5xx are retried;
+ * other failures throw a ScriptException at once. With nullOnNotFound, a 404 returns null.
+ */
+function httpGET({ url, retries = REQUEST_RETRIES, nullOnNotFound = false }) {
+    const maxAttempts = retries + 1;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let response;
+        try {
+            response = http.GET(url, REQUEST_HEADERS, false);
+        } catch (error) {
+            log(`Request error on ${url}: ${error}`);
+            lastError = new ScriptException(`Request error: ${url}`);
+            continue;
+        }
+
+        if (response.code === 429) {
+            log(`Rate limited on ${url}`);
+            lastError = new ScriptException(`Rate limited [${response.code}]: ${url}`);
+            if (attempt < maxAttempts) {
+                bridge.sleep(RATE_LIMIT_WAIT_MS);
+            }
+            continue;
+        }
+        // Android reports a socket timeout as 408
+        if (response.code === 408 || response.code >= 500) {
+            log(`Server error ${response.code} on ${url}`);
+            lastError = new ScriptException(`Server error [${response.code}]: ${url}`);
+            continue;
+        }
+        if (response.code === 404 && nullOnNotFound) {
+            return null;
+        }
+        if (!response.isOk) {
+            throw new ScriptException(`Request failed [${response.code}]: ${url}`);
+        }
+        if (!response.body) {
+            throw new ScriptException(`Empty response: ${url}`);
+        }
+        try {
+            return JSON.parse(response.body);
+        } catch (error) {
+            throw new ScriptException(`Invalid response from ${url}: ${error.message}`);
+        }
     }
 
-    if (!response.isOk || !response.body) {
-        log(`Request failed [${response.code}]: ${url}`);
-        return null;
-    }
-    try {
-        return JSON.parse(response.body);
-    } catch (error) {
-        log(`Invalid response from ${url}: ${error.message}`);
-        return null;
-    }
+    log(`Request failed after ${maxAttempts} attempt(s): ${url}`);
+    throw lastError;
 }
 
 /** Query parameters of a URL; empty when it does not parse. Android's URL polyfill also throws on malformed escapes. */
@@ -533,15 +575,34 @@ function getSearchParams(url) {
     }
 }
 
-/** Refreshes the editions cache once it is older than EDITIONS_TTL_MS; a failed request keeps the existing cache. */
+/**
+ * Refreshes the editions cache once it is older than EDITIONS_TTL_MS, waiting EDITIONS_RETRY_MS after a failure.
+ * A failed or empty response keeps the existing cache, even when stale.
+ */
 function fetchEditions() {
-    if (state.editions.years.length > 0 && Date.now() - state.editions.fetchedAt < EDITIONS_TTL_MS) {
+    const now = Date.now();
+    if (state.editions.years.length > 0 && now - state.editions.fetchedAt < EDITIONS_TTL_MS) {
+        return;
+    }
+    if (now < editionsRetryAt) {
         return;
     }
 
-    const data = httpGET({ url: apiUrl("/editions") });
-    if (!data) {
+    let data;
+    try {
+        data = httpGET({ url: apiUrl("/editions") });
+    } catch (error) {
+        log(`Failed to fetch editions: ${error.message}`);
+        // Counted from the end of the request: retried slow failures can outlast the delay
+        editionsRetryAt = Date.now() + EDITIONS_RETRY_MS;
         return;
+    }
+    if (data.editions.length === 0) {
+        log("Editions response is empty");
+        editionsRetryAt = Date.now() + EDITIONS_RETRY_MS;
+        if (state.editions.years.length > 0) {
+            return;
+        }
     }
 
     const banners = {};
@@ -929,7 +990,7 @@ function createSpeakerChannel(speaker) {
 }
 
 function fetchSpeakerChannel(slug) {
-    const speaker = httpGET({ url: apiUrl(`/speakers/${encodeURIComponent(slug)}`) });
+    const speaker = httpGET({ url: apiUrl(`/speakers/${encodeURIComponent(slug)}`), nullOnNotFound: true });
     if (!speaker) {
         throw new ScriptException(`Speaker not found: ${slug}`);
     }
