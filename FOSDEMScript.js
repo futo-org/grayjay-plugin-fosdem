@@ -60,14 +60,12 @@ const CHANNEL_URL_PARAM = "channel";
 let config = {};
 let settings = {};
 let state = {
-    editions: { years: [], banners: {}, fetchedAt: 0 },
-    // Tracks, rooms and types per year: { [year]: { totalEvents, tracks, rooms, types } }
-    categories: {}
+    editions: { years: [], banners: {}, fetchedAt: 0 }
 };
 // Not persisted, so a restarted plugin requests editions right away
 let editionsRetryAt = 0;
 
-/** Restores the saved editions and categories caches, then refreshes editions if older than EDITIONS_TTL_MS. */
+/** Restores the saved editions cache, then refreshes it if it is older than EDITIONS_TTL_MS. */
 source.enable = function (pluginConfig, pluginSettings, savedState) {
     config = pluginConfig;
     settings = pluginSettings;
@@ -78,9 +76,6 @@ source.enable = function (pluginConfig, pluginSettings, savedState) {
             if (parsed.editions) {
                 state.editions = parsed.editions;
             }
-            if (parsed.categories) {
-                state.categories = parsed.categories;
-            }
         } catch (error) {
             log(`Failed to parse saved state: ${error.message}`);
         }
@@ -89,11 +84,10 @@ source.enable = function (pluginConfig, pluginSettings, savedState) {
     fetchEditions();
 };
 
-/** Saves the editions and categories caches, so a restarted plugin skips their requests. */
+/** Saves the editions cache, so a restarted plugin skips /editions while the cache is fresh. */
 source.saveState = function () {
     return JSON.stringify({
-        editions: state.editions,
-        categories: state.categories
+        editions: state.editions
     });
 };
 
@@ -150,14 +144,8 @@ source.getChannelContents = function (url, type, order, filters) {
 
 source.getChannelPlaylists = function (url) {
     const speakerSlug = getSpeakerSlugFromUrl(url);
-    if (speakerSlug) {
-        const playlists = fetchSpeakerPlaylists(speakerSlug);
-        return new FOSDEMPager(0, (offset) => slicePage(playlists, offset));
-    }
-
     const year = getYearFromChannelUrl(url);
-    const years = year ? [year] : getEditions().years;
-    return new FOSDEMPager({ yearIndex: 0, offset: 0 }, (cursor) => fetchEditionPlaylistsPage(years, cursor));
+    return new FOSDEMPager(1, (page) => fetchCategoryListPage(year, speakerSlug, page));
 };
 
 /** Year-channel URLs share the edition playlist path and are left out. */
@@ -378,55 +366,14 @@ function fetchSpeakerEventsPage(slug, page) {
     return pageResult(data, page, data.items.map((item) => createTalkVideo(withSpeakerHint(item, slug), author)));
 }
 
-/** Walks the editions newest first, each through its edition, track, room and type playlists. */
-function fetchEditionPlaylistsPage(years, { yearIndex, offset }) {
-    if (yearIndex >= years.length) {
-        return { results: [], hasMore: false, nextCursor: { yearIndex, offset } };
-    }
-
-    const page = slicePage(buildPlaylistsForYear(years[yearIndex]), offset);
-    return {
-        results: page.results,
-        hasMore: page.hasMore || yearIndex + 1 < years.length,
-        nextCursor: page.hasMore ? { yearIndex, offset: page.nextCursor } : { yearIndex: yearIndex + 1, offset: 0 }
-    };
-}
-
-function buildPlaylistsForYear(year) {
-    const categories = fetchCategoriesForYear(year);
-    const items = [{ category: "edition", name: `FOSDEM ${year}`, year, count: categories.totalEvents }];
-    for (const category of CATEGORY_FILTERS) {
-        for (const entry of categories[`${category}s`]) {
-            items.push({ category, name: entry.name, year, count: entry.count });
-        }
-    }
-    return items.map((item) => createPlaylistFromCategoryMatch(item));
-}
-
-/** Tracks, rooms and types of an edition, fetched once and kept in the saved state. */
-function fetchCategoriesForYear(year) {
-    const key = String(year);
-    if (!state.categories[key]) {
-        const data = httpGET({ url: apiUrl("/categories", { year }) });
-        state.categories[key] = { totalEvents: data.totalEvents, tracks: data.tracks, rooms: data.rooms, types: data.types };
-    }
-    return state.categories[key];
-}
-
-/** Edition, track, room and type playlists of a speaker's talks, newest year first. An unknown speaker has none. */
-function fetchSpeakerPlaylists(slug) {
-    const data = httpGET({ url: apiUrl(`/speakers/${encodeURIComponent(slug)}/categories`) });
-    const author = speakerAuthor(slug, data.speakerName || slug);
-    const items = data.years.map((entry) => ({ category: "edition", name: `FOSDEM ${entry.name}`, year: parseInt(entry.name, 10), count: entry.count }));
-    for (const category of CATEGORY_FILTERS) {
-        items.push(...data[`${category}s`]);
-    }
-    return items.map((item) => createPlaylistFromCategoryMatch(item, slug, author));
-}
-
-function slicePage(items, offset) {
-    const end = offset + ITEMS_PER_PAGE;
-    return { results: items.slice(offset, end), hasMore: end < items.length, nextCursor: end };
+/**
+ * Fetches one page of edition, track, room and type playlists, newest year first.
+ * A null year covers every edition; a speaker slug limits them to that speaker's talks.
+ */
+function fetchCategoryListPage(year, speakerSlug, page) {
+    const data = fetchApiPage("/categories/list", page, { year, speaker: speakerSlug });
+    const author = speakerSlug ? speakerAuthor(speakerSlug, data.speakerName || speakerSlug) : null;
+    return pageResult(data, page, data.items.map((item) => createPlaylistFromCategoryMatch(item, speakerSlug, author)));
 }
 
 function fetchSearchPage(query, filters, page) {
