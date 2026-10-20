@@ -91,10 +91,9 @@ source.saveState = function () {
     });
 };
 
-/** Talks of every edition, newest first, one edition after another. */
+/** Talks of every edition, newest first. */
 source.getHome = function () {
-    const years = getEditions().years;
-    return new FOSDEMPager({ yearIndex: 0, page: 1 }, (cursor) => fetchEditionsPage(years, cursor));
+    return new FOSDEMPager(1, (page) => fetchEventsPage({}, page));
 };
 
 /** Matches the main channel, a year channel (/{year}/?channel=1) or a speaker profile URL. */
@@ -135,11 +134,11 @@ source.getChannelContents = function (url, type, order, filters) {
         return new FOSDEMPager(1, (page) => fetchSpeakerEventsPage(speakerSlug, page));
     }
 
+    // Null on the main channel, which lists every edition
     const year = getYearFromChannelUrl(url);
-    if (year) {
-        return new FOSDEMPager(1, (page) => fetchEventsPage(year, page));
-    }
-    return source.getHome();
+    // The apps cache subscription items by author URL, so main-channel items carry the main channel as author
+    const author = year ? null : mainAuthor();
+    return new FOSDEMPager(1, (page) => fetchEventsPage({ year, author }, page));
 };
 
 source.getChannelPlaylists = function (url) {
@@ -325,28 +324,13 @@ function fetchEvent(year, slug, speakerSlug) {
     return httpGET({ url: apiUrl(`/events/${year}/${encodeURIComponent(slug)}`, { speaker: speakerSlug }), nullOnNotFound: true });
 }
 
-/** Fetches one page of an edition's talks, newest first, each with its year channel as author. */
-function fetchEventsPage(year, page) {
+/**
+ * Fetches one page of /events, newest first. Without a year it covers every edition;
+ * the author defaults to each item's year channel.
+ */
+function fetchEventsPage({ year, author }, page) {
     const data = fetchApiPage("/events", page, { year });
-    return pageResult(data, page, data.items.map((item) => createTalkVideo(item)));
-}
-
-/** Walks the editions newest first, each through all its pages; editions without talks are skipped. */
-function fetchEditionsPage(years, { yearIndex, page }) {
-    while (yearIndex < years.length) {
-        const data = fetchApiPage("/events", page, { year: years[yearIndex] });
-        const yearHasMore = page < data.totalPages;
-        const nextCursor = yearHasMore ? { yearIndex, page: page + 1 } : { yearIndex: yearIndex + 1, page: 1 };
-        if (data.items.length > 0) {
-            return {
-                results: data.items.map((item) => createTalkVideo(item)),
-                hasMore: yearHasMore || yearIndex + 1 < years.length,
-                nextCursor
-            };
-        }
-        ({ yearIndex, page } = nextCursor);
-    }
-    return { results: [], hasMore: false, nextCursor: { yearIndex, page } };
+    return pageResult(data, page, data.items.map((item) => createTalkVideo(item, author)));
 }
 
 /** One page of an edition playlist, plus totalResults and speakerAuthor (set when the API knows the speaker's name). */
