@@ -2,7 +2,7 @@
   "id": "d890ff43-7d9f-4f0e-a52d-239014fd512d",
   "name": "FOSDEM",
   "description": "FOSDEM is a two-day event organised by volunteers to promote the widespread use of free and open source software.",
-  "version": 4,
+  "version": 5,
   "author": "FUTO",
   "authorUrl": "https://futo.org",
   "platformUrl": "https://fosdem.org",
@@ -58,6 +58,18 @@
     }
   ],
   "changelog": {
+    "5": [
+      "Fix: Timeouts, rate limits and server errors are retried;",
+      "Fix: Lists that fail to load offer a retry instead of showing nothing;",
+      "Fix: Search in a speaker channel returns only that speaker's talks;",
+      "Fix: Talk and video file links with percent-encoded names open the talk;",
+      "Fix: Edition playlists pick up new tracks, rooms and types;",
+      "Fix: Talks only in formats turned off in the settings show a clear error;",
+      "Feature: FOSDEM news posts in the home feed, FOSDEM and edition channels, and search;",
+      "Feature: News posts in subscriptions, when the subscription's Posts setting is on;",
+      "Feature: Talk and speaker links in posts open in the app when they have videos;",
+      "Feature: The next edition shows in the year filter and channel search before its schedule is out;"
+    ],
     "4": [
       "Improvement: Videos from a FOSDEM edition now show that edition's channel as their author;",
       "Improvement: Per-edition channels (FOSDEM 2026, 2025, ...) in channel search;"
