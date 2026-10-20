@@ -81,7 +81,7 @@ const CHANNEL_URL_PARAM = "channel";
 let config = {};
 let settings = {};
 let state = {
-    editions: { years: [], banners: {}, fetchedAt: 0 }
+    editions: { years: [], upcomingYear: null, banners: {}, fetchedAt: 0 }
 };
 // Not persisted, so a restarted plugin requests editions right away
 let editionsRetryAt = 0;
@@ -94,7 +94,8 @@ source.enable = function (pluginConfig, pluginSettings, savedState) {
     if (savedState) {
         try {
             const parsed = JSON.parse(savedState);
-            if (parsed.editions) {
+            // v4 saved editions without upcomingYear; refetch those
+            if (parsed.editions && parsed.editions.upcomingYear !== undefined) {
                 state.editions = parsed.editions;
             }
         } catch (error) {
@@ -290,8 +291,7 @@ source.searchChannels = function (query) {
         return new ContentPager([], false);
     }
 
-    const firstCursor = { pending: findFosdemChannels(query.trim()), speakerPage: 1, speakersLeft: true };
-    return new FOSDEMPager(firstCursor, (cursor) => fetchChannelSearchPage(query.trim(), cursor));
+    return new FOSDEMPager(1, (page) => fetchChannelSearchPage(query, page));
 };
 
 /** The year filter is left out because a year channel implies it. */
@@ -442,39 +442,9 @@ function fetchPlaylistSearchPage(query, page) {
     return pageResult(data, page, data.items.map((item) => createPlaylistFromCategoryMatch(item)));
 }
 
-/**
- * Matching FOSDEM channels come first, then speakers. Speaker pages are fetched until a page is full,
- * and the overflow carries over in the cursor.
- */
-function fetchChannelSearchPage(query, { pending, speakerPage, speakersLeft }) {
-    let channels = pending;
-    while (channels.length < ITEMS_PER_PAGE && speakersLeft) {
-        const data = fetchApiPage("/speakers/search", speakerPage, { q: query });
-        channels = channels.concat(data.items.map(createSpeakerChannel));
-        speakersLeft = speakerPage < data.totalPages;
-        speakerPage++;
-    }
-    const remaining = channels.slice(ITEMS_PER_PAGE);
-    return {
-        results: channels.slice(0, ITEMS_PER_PAGE),
-        hasMore: remaining.length > 0 || speakersLeft,
-        nextCursor: { pending: remaining, speakerPage, speakersLeft }
-    };
-}
-
-/** The main channel when the query is part of "FOSDEM", then each edition whose "FOSDEM {year}" name contains it. */
-function findFosdemChannels(query) {
-    const lowerQuery = query.toLowerCase();
-    const channels = [];
-    if ("fosdem".includes(lowerQuery)) {
-        channels.push(createMainChannel());
-    }
-    for (const year of getEditions().years) {
-        if (`fosdem ${year}`.includes(lowerQuery)) {
-            channels.push(createYearChannel(year));
-        }
-    }
-    return channels;
+function fetchChannelSearchPage(query, page) {
+    const data = fetchApiPage("/channels/search", page, { q: query });
+    return pageResult(data, page, data.items.map(createChannelFromMatch).filter(Boolean));
 }
 
 /** Filters only enrich the search capabilities, so a failed request returns empty lists. */
@@ -494,7 +464,10 @@ function fetchSearchFilters() {
 }
 
 function createYearFilterGroup() {
-    return createFilterGroup("Year", "year", getEditions().years.map(String));
+    const editions = getEditions();
+    // The upcoming edition only has news posts, but a year filter still finds them
+    const years = editions.upcomingYear ? [editions.upcomingYear].concat(editions.years) : editions.years;
+    return createFilterGroup("Year", "year", years.map(String));
 }
 
 function buildCategoryFilterGroups() {
@@ -512,6 +485,20 @@ function buildCategoryFilterGroups() {
 
 function createFilterGroup(name, id, values) {
     return new FilterGroup(name, values.map((value) => new FilterCapability(value, value, value)), false, id);
+}
+
+/** Returns null for a kind this version does not know; the caller filters those out. */
+function createChannelFromMatch(item) {
+    if (item.kind === "fosdem") {
+        return createMainChannel();
+    }
+    if (item.kind === "edition") {
+        return createYearChannel(item.year);
+    }
+    if (item.kind === "speaker") {
+        return createSpeakerChannel(item);
+    }
+    return null;
 }
 
 /**
@@ -611,8 +598,14 @@ function fetchEditions() {
             banners[edition.year] = edition.bannerUrl;
         }
     }
+    // The announced next edition has no schedule yet; it only has news posts and a banner
+    const upcoming = data.upcoming;
+    if (upcoming && upcoming.bannerUrl) {
+        banners[upcoming.year] = upcoming.bannerUrl;
+    }
     state.editions = {
         years: data.editions.map((edition) => edition.year),
+        upcomingYear: upcoming ? upcoming.year : null,
         banners,
         fetchedAt: Date.now()
     };
@@ -628,7 +621,8 @@ function getEditionBannerUrl(year) {
 }
 
 function getMainBannerUrl() {
-    return getEditionBannerUrl(getEditions().years[0]);
+    const editions = getEditions();
+    return getEditionBannerUrl(editions.years[0] ?? editions.upcomingYear);
 }
 
 function getMainThumbnailUrl() {
