@@ -21,6 +21,13 @@
   ],
   "settings": [
     {
+      "variable": "enableNewsPostsInHome",
+      "name": "News posts in Home",
+      "description": "Show FOSDEM news posts in the Home feed",
+      "type": "Boolean",
+      "default": "true"
+    },
+    {
       "variable": "enableMp4",
       "name": "MP4",
       "description": "Enable MP4 (H.264) video source",

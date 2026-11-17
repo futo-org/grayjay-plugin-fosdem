@@ -116,9 +116,9 @@ source.saveState = function () {
     });
 };
 
-/** Talks and news posts of every edition, newest first. */
+/** Talks of every edition, newest first, plus news posts when the "News posts in Home" setting is on. */
 source.getHome = function () {
-    return new FOSDEMPager(1, (page) => fetchEventsPage({ includePosts: true }, page));
+    return new FOSDEMPager(1, (page) => fetchEventsPage({ includePosts: settings.enableNewsPostsInHome }, page));
 };
 
 /** Matches the main channel, a year channel (/{year}/?channel=1) or a speaker profile URL. */
