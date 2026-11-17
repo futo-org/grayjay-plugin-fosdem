@@ -2,7 +2,7 @@
   "id": "d890ff43-7d9f-4f0e-a52d-239014fd512d",
   "name": "FOSDEM",
   "description": "FOSDEM is a two-day event organised by volunteers to promote the widespread use of free and open source software.",
-  "version": 5,
+  "version": 6,
   "author": "FUTO",
   "authorUrl": "https://futo.org",
   "platformUrl": "https://fosdem.org",
@@ -65,6 +65,9 @@
     }
   ],
   "changelog": {
+    "6": [
+      "Feature: Setting to hide news posts from the Home feed;"
+    ],
     "5": [
       "Fix: Timeouts, rate limits and server errors are retried;",
       "Fix: Lists that fail to load offer a retry instead of showing nothing;",
